@@ -31,7 +31,7 @@ Get-Process ClaudeGHubBridge -ErrorAction SilentlyContinue | Stop-Process -Force
 Start-Sleep -Milliseconds 500
 Say "Building..."
 & $csc /nologo /target:winexe /optimize+ /out:"$build\ClaudeGHubBridge.exe" /r:System.Core.dll /r:System.Web.Extensions.dll `
-  /r:"$wpf\UIAutomationClient.dll" /r:"$wpf\UIAutomationTypes.dll" /r:"$wpf\WindowsBase.dll" "$root\src\ClaudeGHubBridge.cs"
+  /r:"$wpf\UIAutomationClient.dll" /r:"$wpf\UIAutomationTypes.dll" /r:"$wpf\WindowsBase.dll" "$root\src\ClaudeGHubBridge.cs" "$root\src\Diagnostics.cs"
 if ($LASTEXITCODE) { throw "Build failed." }
 
 # Icon for G HUB: Claude's own logo from the local Claude install (nothing is bundled) -------------
