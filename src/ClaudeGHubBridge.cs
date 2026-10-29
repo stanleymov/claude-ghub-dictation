@@ -17,6 +17,7 @@ using System.Windows.Automation;
 
 static class Bridge
 {
+    const string Version = "1.1";
     const string Identifier = "claude_dictation";
     const string ActionToggle = "toggle_dictation";
     const string T = "type.googleapis.com/logi.protocol.integrations.";
@@ -29,21 +30,27 @@ static class Bridge
     static readonly JavaScriptSerializer Json = new JavaScriptSerializer { MaxJsonLength = int.MaxValue };
     static readonly object LogLock = new object();
     static string integrationGuid;
+    static int pressCount;
 
     [STAThread]
     static int Main(string[] args)
     {
+        // Log numbers the same way on every PC (no "0,5" vs "0.5").
+        System.Globalization.CultureInfo.DefaultThreadCurrentCulture = System.Globalization.CultureInfo.InvariantCulture;
+        Thread.CurrentThread.CurrentCulture = System.Globalization.CultureInfo.InvariantCulture;
         // UIA rectangles and posted mouse coordinates must both be in physical pixels.
         Native.SetProcessDpiAwarenessContext(new IntPtr(-4));
         Directory.CreateDirectory(Dir);
         // --toggle: one press without G HUB, for testing.
-        if (args.Length > 0 && args[0] == "--toggle") { Log("manual toggle: " + ToggleDictation()); return 0; }
+        if (args.Length > 0 && args[0] == "--toggle") { Log("manual toggle: " + ToggleDictation(0)); return 0; }
 
         bool created;
         using (new Mutex(true, "Local\\ClaudeGHubBridge", out created))
         {
             if (!created) return 0;
-            Log("bridge started");
+            AppDomain.CurrentDomain.UnhandledException += (s, e) => Log("CRASH: " + e.ExceptionObject);
+            Log("bridge " + Version + " started (" + Environment.OSVersion + ", Claude " + ClaudeVersion() + ")");
+            Diag.Start(Log);
             while (true)
             {
                 try { RunSession().Wait(); }
@@ -60,6 +67,7 @@ static class Bridge
             ws.Options.AddSubProtocol("json");
             await ws.ConnectAsync(new Uri("ws://127.0.0.1:9010"), CancellationToken.None);
             Log("connected to G HUB");
+            socket = ws;
 
             var instance = Guid.NewGuid().ToString();
             await Send(ws, "SET", "/api/v1/integration/register", new Dictionary<string, object> {
@@ -93,6 +101,27 @@ static class Bridge
     {
         var msg = Json.Deserialize<Dictionary<string, object>>(text);
         var path = msg.ContainsKey("path") ? msg["path"] as string : null;
+        TaskCompletionSource<Dictionary<string, object>> waiter;
+        var msgId = msg.ContainsKey("msgId") ? msg["msgId"] as string : null;
+        if (msgId != null && Pending.TryRemove(msgId, out waiter)) { waiter.TrySetResult(msg); return; }
+        if (path != null && DeviceEventPaths.Contains(path))
+        {
+            if (path == "/devices/state/activated")
+            {
+                deviceActivatedAt = DateTime.Now;
+                var info = msg.ContainsKey("payload") ? msg["payload"] as Dictionary<string, object> : null;
+                if (info != null && (info.ContainsKey("deviceType") ? info["deviceType"] as string : null) == "HEADSET")
+                {
+                    activatedHeadset = (string)info["id"];
+                    kickedAfterSilence = false;
+                    var id = activatedHeadset;
+                    var _ = Task.Run(() => { Thread.Sleep(2000); Kick(id, "headset turned on"); });
+                }
+            }
+            var body = msg.ContainsKey("payload") ? Json.Serialize(msg["payload"]) : "";
+            Log("G HUB event: " + path + " " + (body.Length > 400 ? body.Substring(0, 400) + "..." : body));
+            return;
+        }
         var payload = msg.ContainsKey("payload") ? msg["payload"] as Dictionary<string, object> : null;
 
         if (path == "/api/v1/integration/activate" && payload != null && payload.ContainsKey("integrationGuid"))
@@ -100,6 +129,8 @@ static class Bridge
             // The action list can only be registered against the guid G HUB assigned on activation.
             integrationGuid = (string)payload["integrationGuid"];
             Log("activated as " + integrationGuid);
+            foreach (var p in DeviceEventPaths) await Send(ws, "SUBSCRIBE", p, null);
+            var _ = Task.Run(() => HeadsetPoller(ws));
             await Send(ws, "SET", "/api/v1/integration/sdk/action", new Dictionary<string, object> {
                 { "@type", T + "Integration.Action.Register" },
                 { "actions", new object[] { new Dictionary<string, object> { { "name", "Toggle dictation" }, { "actionId", ActionToggle } } } },
@@ -115,10 +146,18 @@ static class Bridge
         if (path == "/api/v1/integration/sdk/action/invoke" && payload != null
             && (string)payload["integrationGuid"] == integrationGuid && (string)payload["actionId"] == ActionToggle)
         {
-            var t = new Thread(() => Log("toggle: " + ToggleDictation()));
+            var id = Interlocked.Increment(ref pressCount);
+            Log(string.Format("press #{0}: received from G HUB", id));
+            var t = new Thread(() =>
+            {
+                try { Log(string.Format("press #{0}: {1}", id, ToggleDictation(id))); }
+                catch (Exception e) { Log(string.Format("press #{0}: ERROR {1}", id, e)); }
+            });
             t.SetApartmentState(ApartmentState.STA);
             t.Start();
+            return;
         }
+        if (path != null && path != "/api/v1/integration/sdk/action/invoke") Log("G HUB message: " + msg["verb"] + " " + path);
     }
 
     static readonly object ToggleLock = new object();
@@ -126,18 +165,110 @@ static class Bridge
     // Clicks the composer mic button: stops an active dictation if there is one, otherwise starts one.
     // The click is posted to Claude's window as mouse messages, so Claude never takes focus. UI Automation
     // is only used to read the button's label and position (its Toggle/Invoke actions activate the window).
-    static string ToggleDictation()
+    static string ToggleDictation(int id)
     {
+        var clock = Stopwatch.StartNew();
         lock (ToggleLock)
         {
+            var waited = clock.ElapsedMilliseconds;
             var windows = ClaudeWindows();
             if (windows.Count == 0) return "no Claude window";
             var handles = windows.Select(w => new IntPtr(w.Current.NativeWindowHandle)).ToList();
             var previous = Native.GetForegroundWindow();
+            var idle = Native.IdleSeconds();
+            // Diagnostics that need G HUB or a full window scan run beside the click, never before it.
+            Background(() => Log(string.Format("press #{0}: context: user idle {1:0.0} s, in front '{2}' | headset: {3} ({4})",
+                id, idle, Native.Title(previous), HeadsetState(), SinceActivation())));
             var result = ToggleIn(windows);
-            if (!handles.Contains(previous)) result += GuardFocus(previous, handles);
+            result += string.Format(" | clicked {0} ms after the press reached the bridge{1}", clock.ElapsedMilliseconds,
+                waited > 50 ? string.Format(" (waited {0} ms for the previous press)", waited) : "");
+            if (!handles.Contains(previous)) Background(() => { var g = GuardFocus(previous, handles); if (g != "") Log(string.Format("press #{0}:{1}", id, g)); });
+            if (result.StartsWith("start") || result.StartsWith("stop")) Verify(id, result.StartsWith("start"), windows);
+            Background(() => RefreshCaches(windows));
             return result;
         }
+    }
+
+    static void Background(Action a)
+    {
+        var t = new Thread(() => { try { a(); } catch (Exception e) { Log("background error: " + e.Message); } }) { IsBackground = true };
+        t.SetApartmentState(ApartmentState.STA);
+        t.Start();
+    }
+
+    // Checks after a press whether Claude's microphone really changed, and records what Claude shows.
+    static int latestVerified;
+
+    static void Verify(int id, bool expectOn, List<AutomationElement> windows)
+    {
+        latestVerified = id;
+        var t = new Thread(() =>
+        {
+            try
+            {
+                foreach (var ms in new[] { 600, 2000, 5000 })
+                {
+                    Thread.Sleep(ms == 600 ? 600 : ms == 2000 ? 1400 : 3000);
+                    if (latestVerified != id) { Log(string.Format("press #{0}: later checks skipped (press #{1} came after)", id, latestVerified)); return; }
+                    var mic = Native.ClaudeMicInUse();
+                    var caps = Diag.ClaudeCaptureSessions();
+                    var capText = caps.Count == 0 ? "no capture stream" : string.Join("; ", caps.Select(c =>
+                        string.Format("'{0}' {1} level {2:0.000}{3}", c.Device, c.State == 1 ? "active" : "inactive", c.Peak, c.Mute ? " DEVICE MUTED" : "")));
+                    var ok = mic == expectOn;
+                    if (ms == 2000 && expectOn && mic == true && activatedHeadset != null && !kickedAfterSilence
+                        && (DateTime.Now - deviceActivatedAt).TotalMinutes < 15
+                        && caps.Count > 0 && caps.All(c => c.State != 1 || c.Peak <= 0.0001f))
+                    {
+                        kickedAfterSilence = true;
+                        Kick(activatedHeadset, string.Format("press #{0} hears pure silence {1:0} s after the headset turned on", id, (DateTime.Now - deviceActivatedAt).TotalSeconds));
+                        Thread.Sleep(3000);
+                        var after = Diag.ClaudeCaptureSessions();
+                        if (Native.ClaudeMicInUse() == true && after.Count > 0 && after.All(c => c.State != 1 || c.Peak <= 0.0001f))
+                            MuteToggleKick(activatedHeadset, id);
+                        else
+                            Log(string.Format("press #{0}: after the battery check the mic {1}", id,
+                                after.Any(c => c.State == 1 && c.Peak > 0.0001f) ? "has signal again" : "is no longer recording"));
+                    }
+                    Log(string.Format("press #{0}: +{1}ms mic {2} (expected {3}){4} | {5} | Claude shows: {6}", id, ms,
+                        mic == true ? "ON" : mic == false ? "off" : "unknown", expectOn ? "ON" : "off",
+                        ok ? "" : " WARNING not reached", capText, DictationMessages(windows)));
+                }
+            }
+            catch (Exception e) { Log(string.Format("press #{0}: verify error {1}", id, e.Message)); }
+        }) { IsBackground = true };
+        t.SetApartmentState(ApartmentState.STA);
+        t.Start();
+    }
+
+    // Dictation-related text Claude currently shows (errors, toasts, the mic button label).
+    static string DictationMessages(List<AutomationElement> windows)
+    {
+        // Claude's own dictation strings (en-US), matched from the start so session titles and paths are ignored.
+        var words = new[] { "Dictation", "Starting dictation", "Finishing dictation", "Stop dictation", "Press and hold to record",
+            "Couldn\u2019t start dictation", "Couldn't start dictation", "Claude needs microphone", "Turn on microphone",
+            "You\u2019re offline", "Voice mode", "To use dictation", "Your device, not this site" };
+        var found = new List<string>();
+        foreach (var w in windows)
+            foreach (AutomationElement e in w.FindAll(TreeScope.Descendants, Condition.TrueCondition))
+            {
+                string n;
+                try { n = e.Current.Name; } catch { continue; }
+                if (string.IsNullOrEmpty(n) || n.Length > 160) continue;
+                if (words.Any(k => n.StartsWith(k, StringComparison.Ordinal)) && !found.Contains(n)) found.Add(n);
+                if (found.Count >= 6) break;
+            }
+        return found.Count == 0 ? "-" : string.Join(" / ", found.Select(f => "\"" + f + "\""));
+    }
+
+    static string ClaudeVersion()
+    {
+        try
+        {
+            var p = Process.GetProcessesByName("claude").Select(x => { try { return x.MainModule.FileName; } catch { return null; } })
+                .FirstOrDefault(f => f != null && f.IndexOf("WindowsApps", StringComparison.OrdinalIgnoreCase) >= 0);
+            return p == null ? "not running" : FileVersionInfo.GetVersionInfo(p).ProductVersion;
+        }
+        catch { return "?"; }
     }
 
     // Chromium tries to activate its window when the click focuses the button. Native.Click keeps Windows'
@@ -149,9 +280,12 @@ static class Bridge
             var fg = Native.GetForegroundWindow();
             if (claude.Contains(fg))
             {
+                var held = Stopwatch.StartNew();
                 Native.GiveForeground(previous);
                 Native.SendToBack(fg);
-                return " [focus guard handed focus back]";
+                while (claude.Contains(Native.GetForegroundWindow()) && held.ElapsedMilliseconds < 2000) Thread.Sleep(5);
+                return string.Format(" [focus guard: Claude took focus {0} ms after the click; handed back in {1} ms{2}]",
+                    i * 50, held.ElapsedMilliseconds, claude.Contains(Native.GetForegroundWindow()) ? ", FAILED - Claude still in front" : "");
             }
             Thread.Sleep(50);
         }
@@ -167,8 +301,9 @@ static class Bridge
     static DateTime stoppedTime;
 
     // Claude ignores the mic button while dictation is connecting (~0.5 s after a start) and while it finishes
-    // the transcript (~2 s after a stop), so a press in those windows would be lost. Wait them out instead.
-    const double FinishingSeconds = 2.5;
+    // the transcript after a stop (usually well under a second). A start right after a stop is clicked at once
+    // and clicked again if the microphone did not open.
+    const double FinishingSeconds = 3;
 
     static string ToggleIn(List<AutomationElement> windows)
     {
@@ -197,15 +332,7 @@ static class Bridge
                 Thread.Sleep(250);
                 note += " (waited for start to connect)";
             }
-            if (!stopping)
-            {
-                var sinceStop = (DateTime.Now - stoppedTime).TotalSeconds;
-                if (sinceStop < FinishingSeconds)
-                {
-                    Thread.Sleep(TimeSpan.FromSeconds(FinishingSeconds - sinceStop));
-                    note += " (waited for previous stop to finish)";
-                }
-            }
+            bool justStopped = !stopping && (DateTime.Now - stoppedTime).TotalSeconds < FinishingSeconds;
 
             AutomationElement target;
             if (stopping)
@@ -218,6 +345,18 @@ static class Bridge
             var rect = target.Current.BoundingRectangle;
             var release = ReleasePoint(w, rect);
             Native.Click(h, rect, release);
+            if (justStopped)
+            {
+                // Claude may still have been finishing the previous transcript and ignored the click.
+                for (int attempt = 0; attempt < 2; attempt++)
+                {
+                    var waitUntil = DateTime.Now.AddMilliseconds(1100);
+                    while (DateTime.Now < waitUntil && Native.ClaudeMicInUse() != true) Thread.Sleep(30);
+                    if (Native.ClaudeMicInUse() == true) break;
+                    Native.Click(h, rect, release);
+                    note += " (clicked again: Claude was still finishing the previous dictation)";
+                }
+            }
             if (!stopping)
             {
                 startedWindow = h;
@@ -242,6 +381,16 @@ static class Bridge
     // button means no click reaches it. Never release on the session Stop button left of the mic.
     static System.Windows.Point ReleasePoint(AutomationElement w, System.Windows.Rect mic)
     {
+        var key = string.Format("{0:0},{1:0},{2:0},{3:0}", mic.X, mic.Y, mic.Width, mic.Height);
+        System.Windows.Point cached;
+        lock (CacheLock) if (ReleaseCache.TryGetValue(key, out cached)) return cached;
+        var point = FindReleasePoint(w, mic);
+        lock (CacheLock) ReleaseCache[key] = point;
+        return point;
+    }
+
+    static System.Windows.Point FindReleasePoint(AutomationElement w, System.Windows.Rect mic)
+    {
         var candidates = new[] {
             new System.Windows.Point(mic.Right + 12, mic.Y + mic.Height / 2),
             new System.Windows.Point(mic.X + mic.Width / 2, mic.Y - 8),
@@ -264,7 +413,48 @@ static class Bridge
         return new System.Windows.Point(mic.X + mic.Width / 2, mic.Y + mic.Height / 2);
     }
 
+    // The last mic buttons found, per window; checked with two cheap property reads before use.
+    static readonly Dictionary<IntPtr, List<AutomationElement>> MicCache = new Dictionary<IntPtr, List<AutomationElement>>();
+    static readonly Dictionary<string, System.Windows.Point> ReleaseCache = new Dictionary<string, System.Windows.Point>();
+    static readonly object CacheLock = new object();
+
+    static bool IsMicLabel(string n) { return n == LabelIdle || n == LabelActive || n.StartsWith("Finishing dictation"); }
+
+    static List<AutomationElement> CachedMics(IntPtr h)
+    {
+        List<AutomationElement> mics;
+        lock (CacheLock) if (!MicCache.TryGetValue(h, out mics)) return null;
+        try
+        {
+            foreach (var b in mics)
+                if (!IsMicLabel(b.Current.Name) || b.Current.BoundingRectangle.IsEmpty) return null;
+            return mics;
+        }
+        catch { return null; }
+    }
+
+    // Full searches, run after each press so the next press can use the caches.
+    static void RefreshCaches(List<AutomationElement> windows)
+    {
+        foreach (var w in windows)
+        {
+            var h = new IntPtr(w.Current.NativeWindowHandle);
+            var mics = FindMicButtons(w);
+            lock (CacheLock) MicCache[h] = mics;
+            foreach (var m in mics) ReleasePoint(w, m.Current.BoundingRectangle);
+        }
+    }
+
     static List<AutomationElement> MicButtons(AutomationElement w)
+    {
+        var cached = CachedMics(new IntPtr(w.Current.NativeWindowHandle));
+        if (cached != null) return cached;
+        var found = FindMicButtons(w);
+        lock (CacheLock) MicCache[new IntPtr(w.Current.NativeWindowHandle)] = found;
+        return found;
+    }
+
+    static List<AutomationElement> FindMicButtons(AutomationElement w)
     {
         // Chromium builds its accessibility tree on the first UIA query, so retry briefly.
         for (int attempt = 0; attempt < 8; attempt++)
@@ -309,7 +499,17 @@ static class Bridge
         return mics[0];
     }
 
+    static List<AutomationElement> cachedWindows;
+
     static List<AutomationElement> ClaudeWindows()
+    {
+        var c = cachedWindows;
+        if (c != null && c.Count > 0 && c.All(w => { try { return Native.IsWindow(new IntPtr(w.Current.NativeWindowHandle)); } catch { return false; } }))
+            return c;
+        return cachedWindows = FindClaudeWindows();
+    }
+
+    static List<AutomationElement> FindClaudeWindows()
     {
         var pids = new HashSet<int>(Process.GetProcessesByName("claude")
             .Where(p => { try { return p.MainModule.FileName.IndexOf("WindowsApps", StringComparison.OrdinalIgnoreCase) >= 0 || p.MainModule.FileName.IndexOf("AnthropicClaude", StringComparison.OrdinalIgnoreCase) >= 0; } catch { return false; } })
@@ -327,12 +527,140 @@ static class Bridge
         return File.Exists(f) ? Convert.ToBase64String(File.ReadAllBytes(f)) : "";
     }
 
-    static Task Send(ClientWebSocket ws, string verb, string path, object payload)
+    static readonly SemaphoreSlim SendGate = new SemaphoreSlim(1, 1);
+    static readonly System.Collections.Concurrent.ConcurrentDictionary<string, TaskCompletionSource<Dictionary<string, object>>> Pending =
+        new System.Collections.Concurrent.ConcurrentDictionary<string, TaskCompletionSource<Dictionary<string, object>>>();
+    static ClientWebSocket socket;
+    static DateTime deviceActivatedAt = DateTime.MinValue;
+    static string activatedHeadset;
+    static bool kickedAfterSilence;
+
+    // Some wireless headsets (seen on a G733) power on with a microphone that sends digital silence until the
+    // headset does something like its battery announcement. G HUB's battery check triggers the same thing.
+    // Stage 2: mute and unmute the headset's own microphone, forcing its capture path to re-initialise.
+    static void MuteToggleKick(string deviceId, int pressId)
     {
-        var m = new Dictionary<string, object> { { "msgId", Guid.NewGuid().ToString() }, { "verb", verb }, { "path", path } };
+        Func<bool, object> mute = m => new Dictionary<string, object> {
+            { "@type", "type.googleapis.com/logi.protocol.audio.Volume" }, { "channel", "INPUT" }, { "muted", m } };
+        var on = Request("/audio/" + deviceId + "/mute", mute(true), 2000, "SET");
+        Thread.Sleep(300);
+        var off = Request("/audio/" + deviceId + "/mute", mute(false), 2000, "SET");
+        var check = Request("/audio/" + deviceId + "/mute", new Dictionary<string, object> {
+            { "@type", "type.googleapis.com/logi.protocol.audio.Volume" }, { "channel", "INPUT" } });
+        Thread.Sleep(2000);
+        var caps = Diag.ClaudeCaptureSessions();
+        Log(string.Format("press #{0}: kick 2: headset mic mute toggled (mute {1}, unmute {2}, now {3}) -> mic {4}", pressId,
+            Ok(on) ? "ok" : "failed", Ok(off) ? "ok" : "failed",
+            Ok(check) ? (Equals(Field(check, "muted"), true) ? "MUTED" : "not muted") : "unknown",
+            caps.Any(c => c.State == 1 && c.Peak > 0.0001f) ? "has signal again" : "still silent"));
+    }
+
+    static void Kick(string deviceId, string why)
+    {
+        var ws = socket;
+        if (ws == null || ws.State != WebSocketState.Open) return;
+        try
+        {
+            var r = Request("/battery/" + deviceId + "/check", null, 3000, "SET");
+            Log(string.Format("kick: battery check sent to {0} ({1}) -> {2}", deviceId, why, Ok(r) ? "ok" : "no answer/failed"));
+        }
+        catch (Exception e) { Log("kick: failed " + e.Message); }
+    }
+
+    static string SinceActivation()
+    {
+        return deviceActivatedAt == DateTime.MinValue ? "no device turned on since bridge start"
+            : string.Format("a device turned on {0:0.0} s ago", (DateTime.Now - deviceActivatedAt).TotalSeconds);
+    }
+
+    // G HUB broadcasts on these paths when a device (e.g. a wireless headset) turns on/off or its battery changes.
+    static readonly HashSet<string> DeviceEventPaths = new HashSet<string> {
+        "/devices/state/changed", "/devices/state/activated", "/devices/state/deactivated",
+        "/battery/state/changed", "/receivers/state/changed", "/devices/notification" };
+
+    static Task Send(ClientWebSocket ws, string verb, string path, object payload) { return Send(ws, verb, path, payload, Guid.NewGuid().ToString()); }
+
+    static async Task Send(ClientWebSocket ws, string verb, string path, object payload, string msgId)
+    {
+        var m = new Dictionary<string, object> { { "msgId", msgId }, { "verb", verb }, { "path", path } };
         if (payload != null) m["payload"] = payload;
         var bytes = Encoding.UTF8.GetBytes(Json.Serialize(m));
-        return ws.SendAsync(new ArraySegment<byte>(bytes), WebSocketMessageType.Text, true, CancellationToken.None);
+        await SendGate.WaitAsync();
+        try { await ws.SendAsync(new ArraySegment<byte>(bytes), WebSocketMessageType.Text, true, CancellationToken.None); }
+        finally { SendGate.Release(); }
+    }
+
+    // GET from G HUB and wait for the answer (null on timeout or when not connected).
+    static Dictionary<string, object> Request(string path, object payload, int timeoutMs = 1500, string verb = "GET")
+    {
+        var ws = socket;
+        if (ws == null || ws.State != WebSocketState.Open) return null;
+        var id = Guid.NewGuid().ToString();
+        var tcs = new TaskCompletionSource<Dictionary<string, object>>();
+        Pending[id] = tcs;
+        try
+        {
+            Send(ws, verb, path, payload, id).Wait(timeoutMs);
+            return tcs.Task.Wait(timeoutMs) ? tcs.Task.Result : null;
+        }
+        catch { return null; }
+        finally { Pending.TryRemove(id, out tcs); }
+    }
+
+    static object Field(Dictionary<string, object> msg, string name)
+    {
+        if (msg == null || !msg.ContainsKey("payload")) return null;
+        var p = msg["payload"] as Dictionary<string, object>;
+        return p != null && p.ContainsKey(name) ? p[name] : null;
+    }
+
+    static bool Ok(Dictionary<string, object> msg)
+    {
+        var r = msg == null || !msg.ContainsKey("result") ? null : msg["result"] as Dictionary<string, object>;
+        return r != null && (string)r["code"] == "SUCCESS";
+    }
+
+    // Each G HUB headset: battery (unreachable when the headset is off) and its own mic mute/gain.
+    static string HeadsetState()
+    {
+        try
+        {
+            var list = Request("/devices/list", null);
+            var infos = Field(list, "deviceInfos") as System.Collections.ArrayList;
+            if (infos == null) return "G HUB not reachable";
+            var parts = new List<string>();
+            foreach (Dictionary<string, object> d in infos)
+            {
+                if ((d.ContainsKey("deviceType") ? d["deviceType"] as string : null) != "HEADSET") continue;
+                var id = (string)d["id"];
+                var name = d.ContainsKey("displayName") ? (string)d["displayName"] : id;
+                var bat = Request("/battery/" + id + "/state", null);
+                var input = new Dictionary<string, object> { { "@type", "type.googleapis.com/logi.protocol.audio.Volume" }, { "channel", "INPUT" } };
+                var mute = Request("/audio/" + id + "/mute", input);
+                var vol = Request("/audio/" + id + "/volume", input);
+                parts.Add(string.Format("{0} [{1}] battery {2}{3}, mic {4}, gain {5}", name, d.ContainsKey("state") ? d["state"] : "?",
+                    Ok(bat) ? Field(bat, "percentage") + "%" : "unreachable",
+                    Ok(bat) && Equals(Field(bat, "charging"), true) ? " charging" : "",
+                    Ok(mute) ? (Equals(Field(mute, "muted"), true) ? "MUTED in headset" : "not muted") : "mute unknown",
+                    Ok(vol) && Field(vol, "gain") != null ? string.Format("{0:0}%", Convert.ToDouble(Field(vol, "gain")) * 100) : "?"));
+            }
+            return parts.Count == 0 ? "no G HUB headset" : string.Join("; ", parts);
+        }
+        catch (Exception e) { return "headset query failed: " + e.Message; }
+    }
+
+    // Logs the headset state at start and whenever it changes (checked every 10 s).
+    static void HeadsetPoller(ClientWebSocket ws)
+    {
+        string last = null;
+        while (ws.State == WebSocketState.Open)
+        {
+            var now = HeadsetState();
+            // battery percentage drifts; compare without it
+            var key = System.Text.RegularExpressions.Regex.Replace(now, @"battery \d+%", "battery");
+            if (key != last) { Log("headset: " + now); last = key; }
+            Thread.Sleep(10000);
+        }
     }
 
     static string Flatten(Exception e) { return (e is AggregateException ? e.InnerException ?? e : e).Message; }
@@ -342,7 +670,12 @@ static class Bridge
         lock (LogLock)
         {
             var f = Path.Combine(Dir, "bridge.log");
-            if (File.Exists(f) && new FileInfo(f).Length > 512 * 1024) File.Delete(f);
+            if (File.Exists(f) && new FileInfo(f).Length > 8 * 1024 * 1024)
+            {
+                var old = Path.Combine(Dir, "bridge.1.log");
+                if (File.Exists(old)) File.Delete(old);
+                File.Move(f, old);
+            }
             File.AppendAllText(f, DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff ", System.Globalization.CultureInfo.InvariantCulture) + s + Environment.NewLine);
         }
     }
@@ -451,6 +784,20 @@ static class Native
         }
         return result;
     }
+
+    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+    struct LASTINPUTINFO { public uint cbSize, dwTime; }
+    [System.Runtime.InteropServices.DllImport("user32.dll")] static extern bool GetLastInputInfo(ref LASTINPUTINFO info);
+
+    // Seconds since the last keyboard/mouse input (our own F24 taps count too).
+    public static double IdleSeconds()
+    {
+        var li = new LASTINPUTINFO { cbSize = 8 };
+        GetLastInputInfo(ref li);
+        return unchecked(Environment.TickCount - (int)li.dwTime) / 1000.0;
+    }
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")] public static extern bool IsWindow(IntPtr h);
 
     public static void SendToBack(IntPtr h)
     {
