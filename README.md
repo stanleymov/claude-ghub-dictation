@@ -10,7 +10,7 @@ from anywhere: while you are in a game, with Claude behind other windows or mini
 
 Claude never takes focus, so your game keeps running (tested with Minecraft, windowed and fullscreen).
 
-**Current version: 1.1** (see [what's new](CHANGELOG.md)).
+**Current version: 1.1.1** (see [what's new](CHANGELOG.md)).
 
 > Unofficial community project. Not made, endorsed or supported by Anthropic or Logitech.
 > "Claude" and "Logitech G HUB" are trademarks of their owners. Nothing from either app is included in
@@ -28,14 +28,16 @@ No other downloads: the installer compiles the bridge with the C# compiler that 
 ## Install
 
 1. Download the [latest release](../../releases/latest) (or **Code > Download ZIP**) and unzip it.
-2. Double-click **`install.cmd`**.
+2. Double-click **`install.cmd`** in File Explorer. Don't run it from a terminal inside the Claude app
+   (e.g. by asking Claude Code to install it): Windows then treats the bridge as part of Claude and closes
+   it, silently, the next time Claude updates.
 3. In G HUB, click your device, open **Assignments**, find **Claude > Toggle dictation** and drag it onto a
    button. (On a G733, the mic-mute button works well.)
 
 The bridge runs in the background and starts with Windows. It adds the **Claude** integration to G HUB
 whenever G HUB is running.
 
-**Updating from 1.0:** download 1.1 and run `install.cmd` again. Your G HUB button keeps working.
+**Updating:** download the latest release and run `install.cmd` again. Your G HUB button keeps working.
 
 ## Use
 
@@ -79,6 +81,10 @@ Double-click **`uninstall.cmd`**, then reassign the button in G HUB.
   which microphone Claude records from and its level, headset on/off from G HUB, and Claude's dictation
   messages. `no Claude window` means the Claude app is closed; `no dictation button` means no Claude Code
   session is open or the app is not in English.
+- **It worked, then the button stopped doing anything.** The bridge probably isn't running: it writes an
+  `alive:` line to the log every 10 minutes, so the last one shows when it stopped. Start it again by
+  double-clicking `install.cmd` (or sign out and back in). The usual cause is that it was started from a
+  terminal inside the Claude app and a Claude update closed it.
 - **"Claude" is missing in G HUB.** The bridge must be running (it starts with Windows; run
   `install.cmd` again to start it now). Then reopen G HUB.
 - **Test without G HUB.** Run `"%LOCALAPPDATA%\ClaudeGHubBridge\ClaudeGHubBridge.exe" --toggle`; it

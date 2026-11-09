@@ -17,7 +17,7 @@ using System.Windows.Automation;
 
 static class Bridge
 {
-    const string Version = "1.1";
+    const string Version = "1.1.1";
     const string Identifier = "claude_dictation";
     const string ActionToggle = "toggle_dictation";
     const string T = "type.googleapis.com/logi.protocol.integrations.";
@@ -50,7 +50,13 @@ static class Bridge
             if (!created) return 0;
             AppDomain.CurrentDomain.UnhandledException += (s, e) => Log("CRASH: " + e.ExceptionObject);
             Log("bridge " + Version + " started (" + Environment.OSVersion + ", Claude " + ClaudeVersion() + ")");
+            AppDomain.CurrentDomain.ProcessExit += (s, e) => Log("bridge exiting (process shutdown)");
             Diag.Start(Log);
+            // Heartbeat, so a silent death shows up in the log within 10 minutes.
+            var up = Stopwatch.StartNew();
+            new Thread(() => { while (true) { Thread.Sleep(TimeSpan.FromMinutes(10));
+                Log(string.Format("alive: up {0:0.0} h, {1} presses, G HUB {2}", up.Elapsed.TotalHours, pressCount,
+                    socket != null && socket.State == WebSocketState.Open ? "connected" : "not connected")); } }) { IsBackground = true }.Start();
             while (true)
             {
                 try { RunSession().Wait(); }

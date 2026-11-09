@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.1.1 (2026-11-09)
+
+- **Heartbeat in the log.** Every 10 minutes the bridge writes an `alive:` line (uptime, presses, whether
+  G HUB is connected), and it logs when it exits. If the button ever stops doing anything, the log shows
+  when the bridge stopped.
+- **Install note.** Run `install.cmd` by double-clicking it in File Explorer. A bridge started from a
+  terminal inside the Claude desktop app (for example by Claude Code) counts as part of the Claude app,
+  and Windows closes it, silently, when Claude updates. It then stays off until the next login.
+
 ## 1.1 (2026-10-29)
 
 ### Faster
