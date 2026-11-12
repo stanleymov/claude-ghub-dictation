@@ -17,7 +17,7 @@ using System.Windows.Automation;
 
 static class Bridge
 {
-    const string Version = "1.1.1";
+    const string Version = "1.1.2";
     const string Identifier = "claude_dictation";
     const string ActionToggle = "toggle_dictation";
     const string T = "type.googleapis.com/logi.protocol.integrations.";
@@ -765,9 +765,22 @@ static class Native
         return new System.Windows.Rect(r.Left, r.Top, r.Right - r.Left, r.Bottom - r.Top);
     }
 
-    // Whether Claude currently holds the microphone, from Windows' privacy usage record (LastUsedTimeStop is 0
-    // while in use). Null when Windows has no record for Claude.
+    // Whether Claude is recording: an active Core Audio capture stream owned by a claude.exe process. Accurate
+    // while Claude is hidden. Windows' privacy usage record is only the fallback: Claude 5 stopped updating it.
     public static bool? ClaudeMicInUse()
+    {
+        try
+        {
+            var caps = Diag.ClaudeCaptureSessions();
+            if (caps.Any(c => c.State == 1)) return true;
+            if (caps.Count > 0) return false;
+        }
+        catch { }
+        return RegistryMicInUse();
+    }
+
+    // Windows' privacy usage record (LastUsedTimeStop is 0 while in use). Null when Windows has no record.
+    static bool? RegistryMicInUse()
     {
         const string store = @"Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\microphone";
         bool? result = null;

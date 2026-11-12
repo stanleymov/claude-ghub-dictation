@@ -10,7 +10,7 @@ from anywhere: while you are in a game, with Claude behind other windows or mini
 
 Claude never takes focus, so your game keeps running (tested with Minecraft, windowed and fullscreen).
 
-**Current version: 1.1.1** (see [what's new](CHANGELOG.md)).
+**Current version: 1.1.2** (see [what's new](CHANGELOG.md)). Tested with the Claude desktop app 5.
 
 > Unofficial community project. Not made, endorsed or supported by Anthropic or Logitech.
 > "Claude" and "Logitech G HUB" are trademarks of their owners. Nothing from either app is included in
@@ -64,8 +64,8 @@ Double-click **`uninstall.cmd`**, then reassign the button in G HUB.
   Windows allows that once you have been idle for a while (a headset button is not keyboard/mouse input).
   Before each click the bridge taps **F24**, a key that no keyboard has, which keeps Windows' focus lock
   on. If Claude still ends up in front, the bridge gives focus straight back.
-- **Start or stop.** The bridge reads Windows' microphone usage record to know whether Claude is
-  recording. That stays accurate while Claude is hidden, unlike the button's label.
+- **Start or stop.** The bridge watches Claude's own recording stream (Windows Core Audio) to know
+  whether Claude is recording. That stays accurate while Claude is hidden, unlike the button's label.
 - **Minimized Claude.** Chromium ignores clicks on a minimized window, so on the first press the bridge
   restores Claude without focus and keeps it **behind all other windows** instead of minimized.
 - **Headsets that wake up with a dead mic.** Some wireless headsets (seen on a G733) sometimes power on

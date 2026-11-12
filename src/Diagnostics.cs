@@ -46,7 +46,7 @@ static class Diag
                 var mic = Native.ClaudeMicInUse();
                 if (mic != lastMic)
                 {
-                    log("diag: Claude microphone " + (mic == true ? "ON" : mic == false ? "off" : "unknown") + " (Windows usage record)");
+                    log("diag: Claude microphone " + (mic == true ? "ON" : mic == false ? "off" : "unknown") + " (Claude's recording stream)");
                     if (mic == true) window = new LevelWindow();
                     else if (lastMic == true) window.Flush(log, true);
                     lastMic = mic;
