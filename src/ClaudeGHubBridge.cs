@@ -17,7 +17,7 @@ using System.Windows.Automation;
 
 static class Bridge
 {
-    const string Version = "1.1.2";
+    const string Version = "1.2";
     const string Identifier = "claude_dictation";
     const string ActionToggle = "toggle_dictation";
     const string T = "type.googleapis.com/logi.protocol.integrations.";
@@ -26,7 +26,9 @@ static class Bridge
     const string LabelIdle = "Press and hold to record";
     const string LabelActive = "Stop dictation";
 
-    static readonly string Dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ClaudeGHubBridge");
+    // The log lives next to the exe (normally %LOCALAPPDATA%\ClaudeGHubBridge). Not the AppData path itself:
+    // Windows redirects AppData for packaged apps, so a copy installed from inside one would log elsewhere.
+    static readonly string Dir = AppDomain.CurrentDomain.BaseDirectory.TrimEnd('\\');
     static readonly JavaScriptSerializer Json = new JavaScriptSerializer { MaxJsonLength = int.MaxValue };
     static readonly object LogLock = new object();
     static string integrationGuid;
