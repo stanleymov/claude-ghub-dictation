@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.1.2 (2026-11-12)
+
+- **Works with Claude 5.** Claude 5 no longer shows up in Windows' "app is using the microphone" record,
+  which the bridge used to tell a start from a stop. The bridge now watches Claude's own recording stream
+  (Windows Core Audio) instead, which is accurate while Claude is hidden behind a game. Before this fix a
+  quick second press on Claude 5 could be clicked twice and switch dictation straight back off.
+
 ## 1.1.1 (2026-11-09)
 
 - **Heartbeat in the log.** Every 10 minutes the bridge writes an `alive:` line (uptime, presses, whether
