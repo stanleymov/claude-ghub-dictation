@@ -1,6 +1,7 @@
 # Installs the Claude G HUB bridge for the current Windows user.
 #   - compiles the bridge with the C# compiler that ships with Windows (.NET Framework 4.x), nothing to download
-#   - installs it to %LOCALAPPDATA%\ClaudeGHubBridge and starts it with Windows
+#   - installs it to %LOCALAPPDATA%\ClaudeGHubBridge; a Task Scheduler task starts it at logon and restarts it
+#     within 5 minutes if it ever stops
 #   - the bridge adds a "Claude" integration to Logitech G HUB with a "Toggle dictation" action
 param([switch]$NoAutostart)
 $ErrorActionPreference = "Stop"
@@ -12,6 +13,7 @@ $wpf = Join-Path $env:WINDIR "Microsoft.NET\Framework64\v4.0.30319\WPF"
 function Say($text, $color = "Gray") { Write-Host $text -ForegroundColor $color }
 
 Say "Claude G HUB bridge - installer" "Cyan"
+$installStart = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
 
 # Prerequisites ------------------------------------------------------------------------------------
 if (-not (Test-Path $csc)) { throw "The .NET Framework 4 C# compiler was not found ($csc). It ships with Windows 10 and 11." }
@@ -47,15 +49,26 @@ if ($iconSrc -and (Test-Path $iconSrc)) {
 # Install ------------------------------------------------------------------------------------------
 Copy-Item "$build\ClaudeGHubBridge.exe" $dest -Force
 if (Test-Path "$build\claude.png") { Copy-Item "$build\claude.png" $dest -Force }
-$run = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
-if ($NoAutostart) { Remove-ItemProperty $run ClaudeGHubBridge -ErrorAction SilentlyContinue }
-else { Set-ItemProperty $run ClaudeGHubBridge "`"$dest\ClaudeGHubBridge.exe`"" }
-Start-Process "$dest\ClaudeGHubBridge.exe"
+. "$root\autostart.ps1"
+if ($NoAutostart) {
+  Unregister-BridgeTask
+  Start-Process "$dest\ClaudeGHubBridge.exe"
+} else {
+  # A Task Scheduler task starts the bridge at logon and restarts it within 5 minutes if it ever stops.
+  $exe = Get-PhysicalPath "$dest\ClaudeGHubBridge.exe"
+  if ($exe -ne "$dest\ClaudeGHubBridge.exe") { Say "Running inside an app: the bridge is installed in that app's private folder ($exe)." "Yellow" }
+  Register-BridgeTask $exe
+  Start-Bridge
+}
 
 # Confirm it reached G HUB -------------------------------------------------------------------------
 $log = Join-Path $dest "bridge.log"
 $ok = $false
-foreach ($i in 1..20) { Start-Sleep -Milliseconds 500; if ((Test-Path $log) -and (Get-Content $log -Tail 3) -match "activated as") { $ok = $true; break } }
+foreach ($i in 1..20) {
+  Start-Sleep -Milliseconds 500
+  # Only a connection logged by the bridge just started counts, not one from an earlier run.
+  if ((Test-Path $log) -and (Get-Content $log -Tail 20 | Where-Object { $_ -match "activated as" -and $_.Substring(0, 19) -ge $installStart })) { $ok = $true; break }
+}
 Say ""
 if ($ok) { Say "Installed. The bridge is connected to G HUB." "Green" }
 else { Say "Installed, but the bridge has not reached G HUB yet. It keeps retrying while G HUB is closed." "Yellow" }

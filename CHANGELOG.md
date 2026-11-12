@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.2 (2026-11-12)
+
+- **Watchdog: the bridge keeps itself running.** A per-user Task Scheduler task (`ClaudeGHubBridge`) starts
+  the bridge at logon and checks every 5 minutes, starting it again if it stopped for any reason. It replaces
+  the old startup (Run key) entry. No admin rights needed; `uninstall.cmd` removes it.
+- **Claude updates can no longer stop it.** The bridge is started by Task Scheduler, not by the installer's
+  window, so it never belongs to whatever ran the installer.
+- **Installing from a terminal inside the Claude app works now.** Windows gives packaged apps a private,
+  redirected copy of AppData, so a bridge installed from inside Claude was invisible to Windows' startup and
+  Task Scheduler. The installer detects this and points the task at the real folder, and the bridge keeps its
+  log next to its exe.
+
 ## 1.1.2 (2026-11-12)
 
 - **Works with Claude 5.** Claude 5 no longer shows up in Windows' "app is using the microphone" record,

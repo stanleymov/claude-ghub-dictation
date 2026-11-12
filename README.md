@@ -10,7 +10,7 @@ from anywhere: while you are in a game, with Claude behind other windows or mini
 
 Claude never takes focus, so your game keeps running (tested with Minecraft, windowed and fullscreen).
 
-**Current version: 1.1.2** (see [what's new](CHANGELOG.md)). Tested with the Claude desktop app 5.
+**Current version: 1.2** (see [what's new](CHANGELOG.md)). Tested with the Claude desktop app 5.
 
 > Unofficial community project. Not made, endorsed or supported by Anthropic or Logitech.
 > "Claude" and "Logitech G HUB" are trademarks of their owners. Nothing from either app is included in
@@ -28,14 +28,14 @@ No other downloads: the installer compiles the bridge with the C# compiler that 
 ## Install
 
 1. Download the [latest release](../../releases/latest) (or **Code > Download ZIP**) and unzip it.
-2. Double-click **`install.cmd`** in File Explorer. Don't run it from a terminal inside the Claude app
-   (e.g. by asking Claude Code to install it): Windows then treats the bridge as part of Claude and closes
-   it, silently, the next time Claude updates.
+2. Double-click **`install.cmd`**. (Asking Claude Code to run it from a terminal inside the Claude app also
+   works.)
 3. In G HUB, click your device, open **Assignments**, find **Claude > Toggle dictation** and drag it onto a
    button. (On a G733, the mic-mute button works well.)
 
-The bridge runs in the background and starts with Windows. It adds the **Claude** integration to G HUB
-whenever G HUB is running.
+The bridge runs in the background. A Windows **Task Scheduler** task named `ClaudeGHubBridge` starts it at
+logon and checks every 5 minutes, starting it again if it ever stopped. It adds the **Claude** integration
+to G HUB whenever G HUB is running.
 
 **Updating:** download the latest release and run `install.cmd` again. Your G HUB button keeps working.
 
@@ -50,7 +50,8 @@ goes to the one that is recording.
 
 ## Uninstall
 
-Double-click **`uninstall.cmd`**, then reassign the button in G HUB.
+Double-click **`uninstall.cmd`** (removes the bridge, its Task Scheduler task and its log), then reassign the
+button in G HUB.
 
 ## How it works
 
@@ -66,6 +67,10 @@ Double-click **`uninstall.cmd`**, then reassign the button in G HUB.
   on. If Claude still ends up in front, the bridge gives focus straight back.
 - **Start or stop.** The bridge watches Claude's own recording stream (Windows Core Audio) to know
   whether Claude is recording. That stays accurate while Claude is hidden, unlike the button's label.
+- **Always running.** Task Scheduler starts the bridge, so it never belongs to whatever ran the installer
+  (Windows closes processes started from inside the Claude app when Claude updates). When the installer runs
+  inside a packaged app, it points the task at that app's private copy of AppData, where Windows really put
+  the files.
 - **Minimized Claude.** Chromium ignores clicks on a minimized window, so on the first press the bridge
   restores Claude without focus and keeps it **behind all other windows** instead of minimized.
 - **Headsets that wake up with a dead mic.** Some wireless headsets (seen on a G733) sometimes power on
@@ -76,17 +81,17 @@ Double-click **`uninstall.cmd`**, then reassign the button in G HUB.
 
 ## Troubleshooting
 
-- **Look at the log:** `%LOCALAPPDATA%\ClaudeGHubBridge\bridge.log`. Every press is numbered and checked
+- **Look at the log:** `bridge.log` next to the bridge, normally `%LOCALAPPDATA%\ClaudeGHubBridge\bridge.log`
+  (if you installed from a terminal inside the Claude app, the installer printed its real folder). Every press is numbered and checked
   at 0.6 s, 2 s and 5 s (a `WARNING` means the microphone did not do what was expected). It also shows
   which microphone Claude records from and its level, headset on/off from G HUB, and Claude's dictation
   messages. `no Claude window` means the Claude app is closed; `no dictation button` means no Claude Code
   session is open or the app is not in English.
-- **It worked, then the button stopped doing anything.** The bridge probably isn't running: it writes an
-  `alive:` line to the log every 10 minutes, so the last one shows when it stopped. Start it again by
-  double-clicking `install.cmd` (or sign out and back in). The usual cause is that it was started from a
-  terminal inside the Claude app and a Claude update closed it.
-- **"Claude" is missing in G HUB.** The bridge must be running (it starts with Windows; run
-  `install.cmd` again to start it now). Then reopen G HUB.
+- **It worked, then the button stopped doing anything.** The watchdog restarts a stopped bridge within
+  5 minutes. The log writes an `alive:` line every 10 minutes, so gaps show when it was down. Check that
+  the `ClaudeGHubBridge` task exists in Task Scheduler; running `install.cmd` again recreates it.
+- **"Claude" is missing in G HUB.** The bridge must be running (the task starts it; run `install.cmd`
+  again to start it now). Then reopen G HUB.
 - **Test without G HUB.** Run `"%LOCALAPPDATA%\ClaudeGHubBridge\ClaudeGHubBridge.exe" --toggle`; it
   presses the button once.
 
